@@ -271,6 +271,9 @@ public:
   FunctionMergeResult merge(Function *F1, Function *F2, std::string Name = "",
                             const FunctionMergingOptions &Options = {});
 
+  FunctionMergeResult merge(Function *F1, Function *F2, unsigned &NumMatches, unsigned &TotalEntries, std::string Name = "",
+                            const FunctionMergingOptions &Options = {});
+
   class CodeGenerator {
   private:
     LLVMContext *ContextPtr;

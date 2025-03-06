@@ -1,3 +1,5 @@
+find_package(SQLite3 REQUIRED)
+
 add_llvm_component_library(LLVMipo
   AlwaysInliner.cpp
   Annotation2Metadata.cpp
@@ -47,6 +49,8 @@ add_llvm_component_library(LLVMipo
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/IPO
+  ${pybind11_INCLUDE_DIRS}
+  ${Python3_INCLUDE_DIRS}
 
   DEPENDS
   intrinsics_gen
@@ -73,4 +77,8 @@ add_llvm_component_library(LLVMipo
   TransformUtils
   Vectorize
   Instrumentation
+
+  # Add SQLite3 to the linker libraries
+  LINK_LIBS
+  SQLite::SQLite3
   )

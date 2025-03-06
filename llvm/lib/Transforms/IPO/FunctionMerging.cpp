@@ -122,6 +122,8 @@
 #include <cstdlib>
 #include <ctime>
 
+#include "DatabaseManager.h"
+
 #ifdef __unix__
 /* __unix__ is usually defined by compilers targeting Unix systems */
 #include <unistd.h>
@@ -135,7 +137,7 @@
 
 //#define ENABLE_DEBUG_CODE
 
-//#define SKIP_MERGING
+#define SKIP_MERGING
 
 #define TIME_STEPS_DEBUG
 
@@ -2327,6 +2329,7 @@ private:
   }
 };
 
+static size_t EstimateFunctionSize(Function *F, TargetTransformInfo *TTI);
 
 template <class T> class MatcherReport {
 private:
@@ -2356,14 +2359,69 @@ public:
   }
 
   void report() const {
+    // Check if the environment variable is set
+    dbgs() << "This is right before\n";
+    string BENCH = "";
+    bool DatabaseInfo = false;
+    if (getenv("BENCH") != nullptr) {
+      dbgs() << "BENCH: " << getenv("BENCH") << "\n";
+      BENCH = getenv("BENCH");
+      DatabaseInfo = true;
+    }
+
     char distance_mh_str[20];
 
+    // Initialise the Database
+    string DBLOC;
+    DatabaseManager dbm;
+    if (DatabaseInfo) {
+      // If database location not given, use default location
+      if (getenv("DBLOC") == nullptr) {
+        dbgs() << "Empty DBLOC\n";
+        dbm = DatabaseManager();
+        if (dbm.openDB() != 0) {
+          errs() << "Error: Unable to open the database\n";
+          DatabaseInfo = false;
+        }
+      }
+      // Use given database location
+      else {
+        dbgs() << "Non-Empty DBLOC\n";
+        dbm = DatabaseManager(getenv("DBLOC"));
+        if (dbm.openDB() != 0) {
+          errs() << "Error: Unable to open the database custom location\n";
+          DatabaseInfo = false;
+        }
+      }
+    }
+
+    // DATABASE: Insert benchmark into Benchmark Table and get index
+    int benchmarkID;
+    if (DatabaseInfo) {
+      dbgs() << "Inserting benchmark into Benchmark Table\n";
+      dbm.insertBenchmarkName(BENCH);
+      // benchmarkID = sqlite3_last_insert_rowid(dbm.getDB());
+      benchmarkID = dbm.getBenchmarkID(BENCH);
+      dbgs() << "Index of benchmark is: " << benchmarkID << "\n";
+    }
+
+    int functionID = 0;
     for (auto &entry: candidates) {
       uint64_t val = 0;
       for (auto &num: entry.FPF.OpcodeFreq)
         val += num;
-      errs() << "Function Name: " << GetValueName(entry.candidate)
+      errs() << "Function "<< functionID << " Name: " << GetValueName(entry.candidate)
              << " Fingerprint Size: " << val << "\n";
+
+      // DATABASE: Insert function information into function table
+      if (DatabaseInfo) {
+        // dbgs() << "Inserting function into Function Table\n";
+        auto DataLayout = entry.candidate->getParent()->getDataLayout();
+        auto TargetTransformInfo = TTI(DataLayout);
+        auto EstimatedSize = EstimateFunctionSize(entry.candidate, &TargetTransformInfo);
+        dbm.insertFunctionDetail(benchmarkID, functionID, GetValueName(entry.candidate), val, EstimatedSize);
+      }
+      functionID += 1;
     }
 
     std::string Name("_m_f_");
@@ -2379,11 +2437,33 @@ public:
         std::snprintf(distance_mh_str, 20, "%.5f", distance_mh);
         errs() << "F1: " << it1 - candidates.cbegin() << " + "
                << "F2: " << it2 - candidates.cbegin() << " "
-               << "FQ: " << static_cast<int>(distance_fq) << " "
-               << "MH: " << distance_mh_str << "\n";
-        FunctionMergeResult Result = FM.merge(it1->candidate, it2->candidate, Name, Options);
+               << "FQ: " << static_cast<int>(distance_fq) << " " // Frequency-Based Fingerprint Distance
+               << "MH: " << distance_mh_str << "\n"; // Min Hash Fingerprint Distance
+
+        unsigned NumMatches = 0;
+        unsigned TotalEntries = 0;
+        FunctionMergeResult Result = FM.merge(it1->candidate, it2->candidate, NumMatches, TotalEntries, Name, Options);
+        auto AlignmentScore = ( (double) NumMatches/ (double) TotalEntries);
+
+        if (DatabaseInfo) {
+          auto MergedFunction = Result.getMergedFunction();
+          auto MERGE_TECHNIQUE = getenv("TECHNIQUE");
+          if (MergedFunction != nullptr) {
+            dbgs() << "Function Merged Successfully\n";
+            // Get the estimated function size
+            auto DataLayout = MergedFunction->getParent()->getDataLayout();
+            auto TargetTransformInfo = TTI(DataLayout);
+            auto EstimatedSize = EstimateFunctionSize(MergedFunction, &TargetTransformInfo);
+            dbm.insertFunctionPairDetail(benchmarkID, it1 - candidates.cbegin(), it2 - candidates.cbegin(), MERGE_TECHNIQUE, AlignmentScore, distance_fq, distance_mh, 1, EstimatedSize);
+          }
+          else {
+            dbgs() << "Function Not Merged\n";
+            dbm.insertFunctionPairDetail(benchmarkID, it1 - candidates.cbegin(), it2 - candidates.cbegin(), MERGE_TECHNIQUE, AlignmentScore, distance_fq, distance_mh, 0, 0);
+          }
+        }
       }
     }
+    dbm.closeDB();
   }
 };
 
@@ -2762,6 +2842,443 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name, const Functi
   
   if (ReportStats)
     return ErrorResponse;
+
+  // errs() << "Code Gen\n";
+#ifdef ENABLE_DEBUG_CODE
+  if (Verbose) {
+    for (auto &Entry : AlignedSeq) {
+      if (Entry.match()) {
+        errs() << "1: ";
+        if (isa<BasicBlock>(Entry.get(0)))
+          errs() << "BB " << GetValueName(Entry.get(0)) << "\n";
+        else
+          Entry.get(0)->dump();
+        errs() << "2: ";
+        if (isa<BasicBlock>(Entry.get(1)))
+          errs() << "BB " << GetValueName(Entry.get(1)) << "\n";
+        else
+          Entry.get(1)->dump();
+        errs() << "----\n";
+      } else {
+        if (Entry.get(0)) {
+          errs() << "1: ";
+          if (isa<BasicBlock>(Entry.get(0)))
+            errs() << "BB " << GetValueName(Entry.get(0)) << "\n";
+          else
+            Entry.get(0)->dump();
+          errs() << "2: -\n";
+        } else if (Entry.get(1)) {
+          errs() << "1: -\n";
+          errs() << "2: ";
+          if (isa<BasicBlock>(Entry.get(1)))
+            errs() << "BB " << GetValueName(Entry.get(1)) << "\n";
+          else
+            Entry.get(1)->dump();
+        }
+        errs() << "----\n";
+      }
+    }
+  }
+#endif
+
+#ifdef TIME_STEPS_DEBUG
+  TimeParam.startTimer();
+#endif
+
+  // errs() << "Creating function type\n";
+
+  // Merging parameters
+  std::map<unsigned, unsigned> ParamMap1;
+  std::map<unsigned, unsigned> ParamMap2;
+  std::vector<Type *> Args;
+
+  // errs() << "Merging arguments\n";
+  MergeArguments(Context, F1, F2, AlignedSeq, ParamMap1, ParamMap2, Args,
+                 Options);
+
+  Type *RetType1 = F1->getReturnType();
+  Type *RetType2 = F2->getReturnType();
+  Type *ReturnType = nullptr;
+
+  bool RequiresUnifiedReturn = false;
+
+  // Value *RetUnifiedAddr = nullptr;
+  // Value *RetAddr1 = nullptr;
+  // Value *RetAddr2 = nullptr;
+
+  if (validMergeTypes(F1, F2, Options)) {
+    // errs() << "Simple return types\n";
+    ReturnType = RetType1;
+    if (ReturnType->isVoidTy()) {
+      ReturnType = RetType2;
+    }
+  } else if (Options.EnableUnifiedReturnType) {
+    // errs() << "Unifying return types\n";
+    RequiresUnifiedReturn = true;
+
+    auto SizeOfTy1 = DL->getTypeStoreSize(RetType1);
+    auto SizeOfTy2 = DL->getTypeStoreSize(RetType2);
+    if (SizeOfTy1 >= SizeOfTy2) {
+      ReturnType = RetType1;
+    } else {
+      ReturnType = RetType2;
+    }
+  } else {
+#ifdef TIME_STEPS_DEBUG
+    TimeParam.stopTimer();
+#endif
+    return ErrorResponse;
+  }
+  FunctionType *FTy =
+      FunctionType::get(ReturnType, ArrayRef<Type *>(Args), false);
+
+  if (Name.empty()) {
+    // Name = ".m.f";
+    Name = "_m_f";
+  }
+  /*
+    if (!HasWholeProgram) {
+      Name = M->getModuleIdentifier() + std::string(".");
+    }
+    Name = Name + std::string("m.f");
+  */
+  Function *MergedFunc =
+      Function::Create(FTy, // GlobalValue::LinkageTypes::InternalLinkage,
+                       GlobalValue::LinkageTypes::PrivateLinkage, Twine(Name),
+                       M); // merged.function
+
+  // errs() << "Initializing VMap\n";
+  ValueToValueMapTy VMap;
+
+  std::vector<Argument *> ArgsList;
+  for (Argument &arg : MergedFunc->args()) {
+    ArgsList.push_back(&arg);
+  }
+  Value *FuncId = ArgsList[0];
+  
+  ////TODO: merging attributes might create compilation issues if we are not careful.
+  ////Therefore, attributes are not being merged right now.
+  //auto AttrList1 = F1->getAttributes();
+  //auto AttrList2 = F2->getAttributes();
+  //auto AttrListM = MergedFunc->getAttributes();
+
+  int ArgId = 0;
+  for (auto I = F1->arg_begin(), E = F1->arg_end(); I != E; I++) {
+    VMap[&(*I)] = ArgsList[ParamMap1[ArgId]];
+
+    //auto AttrSet1 = AttrList1.getParamAttributes((*I).getArgNo());
+    //AttrBuilder Attrs(AttrSet1);
+    //AttrListM = AttrListM.addParamAttributes(
+    //    Context, ArgsList[ParamMap1[ArgId]]->getArgNo(), Attrs);
+
+    ArgId++;
+  }
+
+  ArgId = 0;
+  for (auto I = F2->arg_begin(), E = F2->arg_end(); I != E; I++) {
+    VMap[&(*I)] = ArgsList[ParamMap2[ArgId]];
+
+    //auto AttrSet2 = AttrList2.getParamAttributes((*I).getArgNo());
+    //AttrBuilder Attrs(AttrSet2);
+    //AttrListM = AttrListM.addParamAttributes(
+    //    Context, ArgsList[ParamMap2[ArgId]]->getArgNo(), Attrs);
+
+    ArgId++;
+  }
+  //MergedFunc->setAttributes(AttrListM);
+  
+#ifdef TIME_STEPS_DEBUG
+  TimeParam.stopTimer();
+#endif
+
+  // errs() << "Setting attributes\n";
+  SetFunctionAttributes(F1, F2, MergedFunc);
+
+  Value *IsFunc1 = FuncId;
+
+  // errs() << "Running code generator\n";
+
+  auto Gen = [&](auto &CG) {
+    CG.setFunctionIdentifier(IsFunc1)
+        .setEntryPoints(&F1->getEntryBlock(), &F2->getEntryBlock())
+        .setReturnTypes(RetType1, RetType2)
+        .setMergedFunction(MergedFunc)
+        .setMergedEntryPoint(BasicBlock::Create(Context, "entry", MergedFunc))
+        .setMergedReturnType(ReturnType, RequiresUnifiedReturn)
+        .setContext(ContextPtr)
+        .setIntPtrType(IntPtrTy);
+    if (!CG.generate(AlignedSeq, VMap, Options)) {
+      // F1->dump();
+      // F2->dump();
+      // MergedFunc->dump();
+      MergedFunc->eraseFromParent();
+      MergedFunc = nullptr;
+      if (Debug)
+        errs() << "ERROR: Failed to generate the merged function!\n";
+    }
+  };
+
+  SALSSACodeGen CG(F1, F2);
+  Gen(CG);
+
+  FunctionMergeResult Result(F1, F2, MergedFunc, RequiresUnifiedReturn);
+  Result.setArgumentMapping(F1, ParamMap1);
+  Result.setArgumentMapping(F2, ParamMap2);
+  Result.setFunctionIdArgument(FuncId != nullptr);
+  return Result;
+}
+
+FunctionMergeResult
+FunctionMerger::merge(Function *F1, Function *F2, unsigned &NumMatches, unsigned &TotalEntries, std::string Name, const FunctionMergingOptions &Options) {
+  bool ProfitableFn = true;
+  LLVMContext &Context = *ContextPtr;
+  FunctionMergeResult ErrorResponse(F1, F2, nullptr);
+
+  if (!validMergePair(F1, F2))
+    return ErrorResponse;
+
+#ifdef TIME_STEPS_DEBUG
+  TimeAlign.startTimer();
+  time_align_start = std::chrono::steady_clock::now();
+#endif
+
+  AlignedCode AlignedSeq;
+  NeedlemanWunschSA<SmallVectorImpl<Value *>> SA(ScoringSystem(-1, 2), FunctionMerger::match);
+
+  if (EnableHyFMNW || EnableHyFMPA) { // Processing individual pairs of blocks
+
+    int B1Max{0}, B2Max{0};
+    size_t MaxMem{0};
+
+    int NumBB1{0}, NumBB2{0};
+    size_t MemSize{0};
+
+#ifdef TIME_STEPS_DEBUG
+    TimeAlignRank.startTimer();
+#endif
+
+    // Fingerprints for all Blocks in F1 organized by size
+    std::map<size_t, std::vector<BlockFingerprint>> Blocks;
+    for (BasicBlock &BB1 : *F1) {
+      BlockFingerprint BD1(&BB1);
+      NumBB1++;
+      MemSize += BD1.footprint();
+      Blocks[BD1.Size].push_back(std::move(BD1));
+    }
+
+#ifdef TIME_STEPS_DEBUG
+    TimeAlignRank.stopTimer();
+#endif
+
+    for (BasicBlock &BIt : *F2) {
+#ifdef TIME_STEPS_DEBUG
+      TimeAlignRank.startTimer();
+#endif
+      BasicBlock *BB2 = &BIt;
+      BlockFingerprint BD2(BB2);
+      NumBB2++;
+      MemSize += BD2.footprint();
+
+      // list all the map entries in Blocks in order of distance from BD2.Size
+      auto ItSetIncr = Blocks.lower_bound(BD2.Size);
+      auto ItSetDecr = std::reverse_iterator(ItSetIncr);
+      std::vector<decltype(ItSetIncr)> ItSets;
+
+      if (EnableHyFMNW) { 
+        while (ItSetDecr != Blocks.rend() && ItSetIncr != Blocks.end()) {
+          if (BD2.Size - ItSetDecr->first < ItSetIncr->first - BD2.Size){
+            ItSets.push_back(std::prev(ItSetDecr.base())); 
+            ItSetDecr++;
+          } else {
+            ItSets.push_back(ItSetIncr);
+            ItSetIncr++;
+          }
+        }
+
+        while (ItSetDecr != Blocks.rend()) {
+          ItSets.push_back(std::prev(ItSetDecr.base())); 
+          ItSetDecr++;
+        }
+
+        while (ItSetIncr != Blocks.end()) {
+          ItSets.push_back(ItSetIncr);
+          ItSetIncr++;
+        }
+      } else {
+        ItSetIncr = Blocks.find(BD2.Size);
+        if (ItSetIncr != Blocks.end())
+          ItSets.push_back(ItSetIncr);
+      }
+
+      // Find the closest block starting from blocks with similar size
+      std::vector<BlockFingerprint>::iterator BestIt;
+      std::map<size_t, std::vector<BlockFingerprint>>::iterator BestSet;
+      float BestDist = std::numeric_limits<float>::max();
+
+      for (auto ItSet : ItSets) {
+        for (auto BDIt = ItSet->second.begin(), E = ItSet->second.end(); BDIt != E; BDIt++) {
+          auto D = BD2.distance(*BDIt);
+          if (D < BestDist) {
+            BestDist = D;
+            BestIt = BDIt;
+            BestSet = ItSet;
+            if (BestDist < std::numeric_limits<float>::epsilon())
+              break;
+          }
+        }
+        if (BestDist < std::numeric_limits<float>::epsilon())
+          break;
+      }
+
+#ifdef TIME_STEPS_DEBUG
+      TimeAlignRank.stopTimer();
+#endif
+
+      bool MergedBlock = false;
+      if (BestDist < std::numeric_limits<float>::max()) {
+        BasicBlock *BB1 = BestIt->BB;
+        AlignedCode AlignedBlocks;
+
+        if (EnableHyFMNW) {
+          SmallVector<Value *, 8> BB1Vec;
+          vectorizeBB(BB1Vec, BB1);
+
+          SmallVector<Value *, 8> BB2Vec;
+          vectorizeBB(BB2Vec, BB2);
+
+          AlignedBlocks = SA.getAlignment(BB1Vec, BB2Vec);
+
+          if (Verbose) {
+            auto MemReq = SA.getMemoryRequirement(BB1Vec, BB2Vec);
+            errs() << "MStats: " << BB1Vec.size() << " , " << BB2Vec.size() << " , " << MemReq << "\n";
+
+            if (MemReq > MaxMem) {
+              MaxMem = MemReq;
+              B1Max = BB1Vec.size();
+              B2Max = BB2Vec.size();
+            }
+          }
+        } else if (EnableHyFMPA) {
+          AlignedBlocks = AlignedCode(BB1, BB2);
+
+          if (Verbose) {
+            auto MemReq = AlignedBlocks.size() * (sizeof(AlignedCode::Entry) + 2 * sizeof(void*));
+            errs() << "MStats: " << BB1->size() << " , " << BB2->size() << " , " << MemReq << "\n";
+
+            if (MemReq > MaxMem) {
+              MaxMem = MemReq;
+              B1Max = BB1->size();
+              B2Max = BB2->size();
+            }
+          }
+		}
+
+        if (!HyFMProfitability || AlignedBlocks.isProfitable()) {
+          AlignedSeq.extend(AlignedBlocks);
+          BestSet->second.erase(BestIt);
+          MergedBlock = true;
+        }
+      }
+
+      if (!MergedBlock)
+        AlignedSeq.extend(AlignedCode(nullptr, BB2));
+    }
+
+    for (auto &Pair : Blocks)
+      for (auto &BD1 : Pair.second)
+        AlignedSeq.extend(AlignedCode(BD1.BB, nullptr));
+
+    if (Verbose) {
+      errs() << "SStats: " << B1Max << " , " << B2Max << " , " << MaxMem << "\n";
+      errs() << "RStats: " << NumBB1 << " , " << NumBB2 << " , " << MemSize << "\n";
+    }
+
+    ProfitableFn = AlignedSeq.hasMatches();
+
+  } else { //default SALSSA
+    SmallVector<Value *, 8> F1Vec;
+    SmallVector<Value *, 8> F2Vec;
+
+#ifdef TIME_STEPS_DEBUG
+    TimeLin.startTimer();
+#endif
+    linearize(F1, F1Vec);
+    linearize(F2, F2Vec);
+#ifdef TIME_STEPS_DEBUG
+    TimeLin.stopTimer();
+#endif
+
+    auto MemReq = SA.getMemoryRequirement(F1Vec, F2Vec);
+    auto MemAvailable = getTotalSystemMemory();
+    errs() << "MStats: " << F1Vec.size() << " , " << F2Vec.size() << " , " << MemReq << "\n";
+    if (MemReq > MemAvailable * 0.9) {
+      errs() << "Insufficient Memory\n";
+#ifdef TIME_STEPS_DEBUG
+      TimeAlign.stopTimer();
+      time_align_end = std::chrono::steady_clock::now();
+#endif
+      return ErrorResponse;
+    }
+    
+    AlignedSeq = SA.getAlignment(F1Vec, F2Vec);
+  }
+
+#ifdef TIME_STEPS_DEBUG
+  TimeAlign.stopTimer();
+  time_align_end = std::chrono::steady_clock::now();
+#endif
+  if (!ProfitableFn && !ReportStats) {
+    if (Verbose)
+      errs() << "Skipped: Not profitable enough!!\n";
+    return ErrorResponse;
+  }
+
+  // unsigned NumMatches = 0;
+  // unsigned TotalEntries = 0;
+  AcrossBlocks = false;
+  BasicBlock *CurrBB0 = nullptr;
+  BasicBlock *CurrBB1 = nullptr;
+  for (auto &Entry : AlignedSeq) {
+    TotalEntries++;
+    if (Entry.match()) {
+      NumMatches++;
+      if (isa<BasicBlock>(Entry.get(1))) {
+        CurrBB1 = cast<BasicBlock>(Entry.get(1));
+      } else if (auto *I = dyn_cast<Instruction>(Entry.get(1))) {
+        if (CurrBB1 == nullptr)
+          CurrBB1 = I->getParent();
+        else if (CurrBB1 != I->getParent()) {
+          AcrossBlocks = true;
+        }
+      }
+      if (isa<BasicBlock>(Entry.get(0))) {
+        CurrBB0 = cast<BasicBlock>(Entry.get(0));
+      } else if (auto *I = dyn_cast<Instruction>(Entry.get(0))) {
+        if (CurrBB0 == nullptr)
+          CurrBB0 = I->getParent();
+        else if (CurrBB0 != I->getParent()) {
+          AcrossBlocks = true;
+        }
+      }
+    } else {
+      if (isa_and_nonnull<BasicBlock>(Entry.get(0)))
+        CurrBB1 = nullptr;
+      if (isa_and_nonnull<BasicBlock>(Entry.get(1)))
+        CurrBB0 = nullptr;
+    }
+  }
+  if (AcrossBlocks) {
+    if (Verbose) {
+      errs() << "Across Basic Blocks\n";
+    }
+  }
+  if (Verbose || ReportStats) {
+    errs() << "Matches: " << NumMatches << ", " << TotalEntries << ", " << ( (double) NumMatches/ (double) TotalEntries) << "\n";
+  }
+  
+  if (ReportStats){
+    return ErrorResponse;
+  }
 
   // errs() << "Code Gen\n";
 #ifdef ENABLE_DEBUG_CODE
