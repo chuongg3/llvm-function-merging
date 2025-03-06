@@ -1,4 +1,11 @@
 find_package(SQLite3 REQUIRED)
+find_package(pybind11 REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+
+# Include Python headers
+include_directories(${Python3_INCLUDE_DIRS})
+link_directories(${Python3_LIBRARY_DIRS})
+add_definitions(-DPYBIND11_PYTHON_VERSION=${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR})
 
 add_llvm_component_library(LLVMipo
   AlwaysInliner.cpp
@@ -77,8 +84,11 @@ add_llvm_component_library(LLVMipo
   TransformUtils
   Vectorize
   Instrumentation
+  Option
 
   # Add SQLite3 to the linker libraries
   LINK_LIBS
   SQLite::SQLite3
+  pybind11::module
+  Python3::Python
   )

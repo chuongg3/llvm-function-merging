@@ -123,6 +123,7 @@
 #include <ctime>
 
 #include "DatabaseManager.h"
+#include <pybind11/pybind11.h>
 
 #ifdef __unix__
 /* __unix__ is usually defined by compilers targeting Unix systems */
