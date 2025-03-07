@@ -123,7 +123,8 @@
 #include <ctime>
 
 #include "DatabaseManager.h"
-#include <pybind11/pybind11.h>
+#include <sstream>
+#include "MatchingHelper.h"
 
 #ifdef __unix__
 /* __unix__ is usually defined by compilers targeting Unix systems */
@@ -262,6 +263,15 @@ static cl::opt<unsigned> BucketSizeCap(
 static cl::opt<std::string> ToMergeFile(
     "func-merging-pairs-file", cl::init(""), cl::value_desc("filename"),
     cl::desc("File containing the functions and basic blocks to merge"), cl::Hidden);
+
+// Pass the current benchmark name through the command line
+static cl::opt<std::string> Benchmark(
+  "benchmark-name", cl::init(""), cl::value_desc("benchmarkname"),
+  cl::desc("Current Running Benchmarks Name"), cl::Hidden);
+
+static cl::opt<bool> PredictAlignment(
+  "predict-alignment", cl::init(false), cl::Hidden,
+  cl::desc("Enable the prediction of the alignment between functions"));
 
 static std::string GetValueName(const Value *V);
 
@@ -2330,6 +2340,342 @@ private:
   }
 };
 
+template <class T, template<typename> class FPTy = Fingerprint> class MatcherAlignmentScoreFPTy : public Matcher<T>{
+private:
+  struct MatcherEntry {
+    T candidate;
+    size_t size;
+    FPTy<T> FP;
+    MatcherEntry() : MatcherEntry(nullptr, 0){};
+
+    template<typename T1 = FPTy<T>, typename T2 = Fingerprint<T>>
+    MatcherEntry(T candidate, size_t size,
+    typename std::enable_if_t<std::is_same<T1,T2>::value, int> * = nullptr)
+        : candidate(candidate), size(size), FP(candidate){}
+
+    template <typename T1 = FPTy<T>, typename T2 = FingerprintMH<T>>
+    MatcherEntry(T candidate, size_t size, SearchStrategy &strategy,
+    typename std::enable_if_t<std::is_same<T1, T2>::value, int> * = nullptr)
+        : candidate(candidate), size(size), FP(candidate, strategy){}
+  };
+  using MatcherIt = typename std::list<MatcherEntry>::iterator;
+
+  bool initialized{false};
+  FunctionMerger &FM;
+  FunctionMergingOptions &Options;
+  std::list<MatcherEntry> candidates;
+  std::unordered_map<T, MatcherIt> cache;
+  std::vector<MatchInfo<T>> matches;
+  SearchStrategy strategy;
+
+  // AlignmentScore Prediction Related Variables
+  std::string EncodingBaseDir = "/home/chuongg3/Projects/ThirdYearProject/scripts/GetEncoding/Embedding";
+  std::unordered_map<std::string, std::vector<double>> FunctionEncodingMap;
+  MatchingHelper Helper = MatchingHelper();
+
+  // Reads the file output from IR2Vec and then returns a unordered map of function name to vector embeddings
+  std::unordered_map<std::string, std::vector<double>> getFunctionMapVector(const std::string& benchmarkname) {
+    dbgs() << "Generating Function Map\n";
+
+    // Initialise the map
+    std::unordered_map<std::string, std::vector<double>> encoding_map;
+
+    // Try accessing the file
+    std::string encodingFile = EncodingBaseDir + "/" + benchmarkname + ".emb";
+    std::ifstream file(encodingFile);
+    if (!file.is_open()) {
+      dbgs() << "Error opening file: " << encodingFile << "\n";
+      return encoding_map;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Split the line into function name and vector
+        size_t separatorPos = line.find("\t=\t");
+        if (separatorPos != std::string::npos) {
+            std::string FunctionName = line.substr(0, separatorPos);
+            std::string Vector = line.substr(separatorPos + 3); // Skip the "\t=\t" part
+
+            // Remove leading "llvm-link__" from FunctionName
+            if (FunctionName.length() > 11 && FunctionName.substr(0, 11) == "llvm-link__") {
+                FunctionName = FunctionName.substr(11);
+            }
+
+            // Convert the vector string into an actual vector of doubles
+            std::vector<double> vectorValues;
+            std::istringstream iss(Vector);
+            double value;
+
+            while (iss >> value) {
+                vectorValues.push_back(value);
+            }
+
+            // Add the vector to the dictionary
+            encoding_map[FunctionName] = vectorValues;
+        }
+    }
+
+    dbgs() << "Function Map Size: " << encoding_map.size() << "\n";
+    dbgs() << "Finished Generating Function Map" << "\n";
+    return encoding_map;
+  }
+public:
+  MatcherAlignmentScoreFPTy()
+      : FunctionEncodingMap(getFunctionMapVector(Benchmark)) {}
+  MatcherAlignmentScoreFPTy(FunctionMerger &FM, FunctionMergingOptions &Options, size_t rows=2, size_t bands=100)
+      : FM(FM), Options(Options), strategy(rows, bands),
+      FunctionEncodingMap(getFunctionMapVector(Benchmark)) {};
+
+  virtual ~MatcherAlignmentScoreFPTy() = default;
+
+  void add_candidate(T candidate, size_t size) override {
+    add_candidate_helper(candidate, size);
+    cache[candidate] = candidates.begin();
+  }
+
+  template<typename T1 = FPTy<T>, typename T2 = Fingerprint<T>>
+  void add_candidate_helper(T candidate, size_t size,
+  typename std::enable_if_t<std::is_same<T1,T2>::value, int> * = nullptr)
+  {
+      candidates.emplace_front(candidate, size);
+  }
+
+  template<typename T1 = FPTy<T>, typename T2 = Fingerprint<T>>
+  void add_candidate_helper(T candidate, size_t size,
+  typename std::enable_if_t<!std::is_same<T1,T2>::value, int> * = nullptr)
+  {
+      candidates.emplace_front(candidate, size, strategy);
+  }
+
+  void remove_candidate(T candidate) override {
+    auto cache_it = cache.find(candidate);
+    assert(cache_it != cache.end());
+    candidates.erase(cache_it->second);
+  }
+
+  T next_candidate() override {
+    if (!initialized) {
+      candidates.sort([&](auto &item1, auto &item2) -> bool {
+        return item1.FP.magnitude > item2.FP.magnitude;
+      });
+      initialized = true;
+    }
+    update_matches(candidates.begin());
+    return candidates.front().candidate;
+  }
+
+  std::vector<MatchInfo<T>> &get_matches(T candidate) override {
+    return matches;
+  }
+
+  size_t size() override { return candidates.size(); }
+
+  void print_stats() override {
+    int Sum = 0;
+    int Count = 0;
+    float MinDistance = std::numeric_limits<float>::max();
+    float MaxDistance = 0;
+
+    int Index1 = 0;
+    for (auto It1 = candidates.begin(), E1 = candidates.end(); It1!=E1; It1++) {
+
+      int BestIndex = 0;
+      bool FoundCandidate = false;
+      float BestDist = std::numeric_limits<float>::max();
+
+      unsigned CountCandidates = 0;
+      int Index2 = Index1;
+      for (auto It2 = It1, E2 = candidates.end(); It2 != E2; It2++) {
+
+        if (It1->candidate == It2->candidate || Index1 == Index2) {
+          Index2++;
+          continue;
+        }
+
+        if ((!FM.validMergeTypes(It1->candidate, It2->candidate, Options) &&
+              !Options.EnableUnifiedReturnType) ||
+            !validMergePair(It1->candidate, It2->candidate))
+          continue;
+
+        auto Dist = It1->FP.distance(It2->FP);
+        if (Dist < BestDist) {
+          BestDist = Dist;
+          FoundCandidate = true;
+          BestIndex = Index2;
+        }
+        if (RankingThreshold && CountCandidates > RankingThreshold) {
+          break;
+        }
+        CountCandidates++;
+        Index2++;
+      }
+      if (FoundCandidate) {
+        int Distance = std::abs(Index1 - BestIndex);
+        Sum += Distance;
+        if (Distance > MaxDistance) MaxDistance = Distance;
+        if (Distance < MinDistance) MinDistance = Distance;
+        Count++;
+      }
+      Index1++;
+    }
+    errs() << "Total: " << Count << "\n";
+    errs() << "Min Distance: " << MinDistance << "\n";
+    errs() << "Max Distance: " << MaxDistance << "\n";
+    errs() << "Average Distance: " << (((double)Sum)/((double)Count)) << "\n";
+  }
+
+private:
+  std::string processFunctionName(std::string RawName) {
+    // Remove the '@' in front of the function name
+    RawName = RawName.substr(1);
+
+    // Remove any " surround function name
+    auto start_it = RawName.begin();
+    auto end_it = RawName.rbegin();
+    while (start_it != RawName.end() && *start_it == '"') {
+        ++start_it;
+    }
+    while (end_it != RawName.rend() && *end_it == '"') {
+        ++end_it;
+    }
+    return std::string(start_it, end_it.base());
+  }
+
+  void update_matches(MatcherIt it) {
+    errs() << "Updating Matches\n";
+    size_t CountCandidates = 0;
+    matches.clear();
+
+    MatchInfo<T> best_match;
+    best_match.OtherSize = it->size;
+    best_match.OtherMagnitude = it->FP.magnitude;
+    best_match.Distance = std::numeric_limits<float>::min();
+
+    errs() << "Current Function Name: " << it->candidate->getName() << "\n";
+    errs() << "First Function Name (Skipped): " << candidates.front().candidate->getName() << "\n";
+
+    // Initialise variables for this
+    std::vector<float> entry_encoding;
+    std::vector<float> current_encoding;
+    std::vector<bool> valid_candidates;
+
+    // Get the current function's encoding and preprocess it
+    auto candidate_encoding = FunctionEncodingMap.at(processFunctionName(GetValueName(it->candidate)));
+    auto candidate_name = GetValueName(it->candidate);
+    dbgs() << "Updating matches for " << candidate_name << "\n";
+
+    if (ExplorationThreshold == 1) {
+      //// Go through every single candidate and find the best match
+      for (auto entry = std::next(candidates.cbegin()); entry != candidates.cend(); ++entry) {
+        auto entry_name = GetValueName(entry->candidate);
+        dbgs() << "Currently Assessing: " << candidate_name << "\n";
+        // If not valid, skip
+        if (it->candidate == entry->candidate) {
+          dbgs() << "Skipping: Same Pair: " << candidate_name << " | " << entry_name << "\n";
+          valid_candidates.push_back(false);
+          continue;
+        }
+        else if ((!FM.validMergeTypes(it->candidate, entry->candidate, Options) &&
+              !Options.EnableUnifiedReturnType) ||
+            !validMergePair(it->candidate, entry->candidate)){
+          dbgs() << "Skipping Invalid Pair: " << candidate_name << " | " << entry_name << "\n";
+          valid_candidates.push_back(false);
+          continue;
+        }
+        dbgs() << "Accepting Pair: " << candidate_name << " | " << entry_name << "\n";
+
+        // Get the current entry's encoding
+        auto entry_vec = FunctionEncodingMap.at(processFunctionName(GetValueName(entry->candidate)));
+        entry_encoding.insert(entry_encoding.end(), entry_vec.begin(), entry_vec.end());
+        current_encoding.insert(current_encoding.end(), candidate_encoding.begin(), candidate_encoding.end());
+        valid_candidates.push_back(true);
+        if (RankingThreshold && (CountCandidates > RankingThreshold))
+          break;
+        CountCandidates++;
+
+      }
+      // Using the model to predict alignment score
+      dbgs() << "Predicting Alignent Score";
+      std::vector<float> candidate_float(candidate_encoding.begin(), candidate_encoding.end());
+      std::vector<float> entry_float(entry_encoding.begin(), entry_encoding.end());
+      // std::vector<float> results = Helper.predict_value(current_encoding, entry_float);
+      std::vector<float> results = Helper.predict_in_batches(current_encoding, entry_float);
+
+      // End if there are no predictions
+      if (results.size() == 0) {
+        dbgs() << "No Predictions\n";
+        return;
+      }
+
+      // Find the index with the highest score
+      auto max_it = std::max_element(results.begin(), results.end());
+      int index = std::distance(results.begin(), max_it);
+      dbgs() << "Highest Alignment Score: " << *max_it << "\n";
+
+      // Get the candidate with the highest alignment score
+      int count = 0;
+      for (unsigned int i = 0; i < candidates.size(); i++) {
+        if (count == index) {
+          auto best_candidate = candidates.cbegin();
+          std::advance(best_candidate, i);
+          dbgs() << "Best Candidate: " << GetValueName(best_candidate->candidate) << "\n";
+          best_match.candidate = best_candidate->candidate;
+          best_match.Size = best_candidate->size;
+          best_match.Magnitude = best_candidate->FP.magnitude;
+          best_match.Distance = results.at(index);
+          break;
+        }
+        else if (valid_candidates.at(i))
+          count++;
+      }
+
+      // Place best candidate in matches one is found
+      if (best_match.candidate != nullptr)
+        matches.push_back(std::move(best_match));
+      return;
+    }
+
+    //// Loop through all candidates
+    for (auto &entry : candidates) {
+      //// If it is the same candidate, no need to compare
+      if (entry.candidate == it->candidate)
+        continue;
+      //// If not valid, skip this candidate
+      if ((!FM.validMergeTypes(it->candidate, entry.candidate, Options) &&
+            !Options.EnableUnifiedReturnType) ||
+          !validMergePair(it->candidate, entry.candidate))
+        continue;
+
+      //// Add the new matches to matches
+      MatchInfo<T> new_match(entry.candidate, entry.size);
+      new_match.Distance = it->FP.distance(entry.FP);
+      new_match.OtherSize = it->size;
+      new_match.OtherMagnitude = it->FP.magnitude;
+      new_match.Magnitude = entry.FP.magnitude;
+      if (!EnableF3M || new_match.Distance < RankingDistance)
+        matches.push_back(std::move(new_match));
+      if (RankingThreshold && (CountCandidates > RankingThreshold))
+        break;
+      CountCandidates++;
+    }
+
+    // If we have more matches than the threshold
+    if (ExplorationThreshold < matches.size()) {
+      std::partial_sort(matches.begin(), matches.begin() + ExplorationThreshold,
+                        matches.end(), [&](auto &match1, auto &match2) -> bool {
+                          return match1.Distance > match2.Distance;
+                        });
+      matches.resize(ExplorationThreshold);
+      std::reverse(matches.begin(), matches.end());
+    } else {
+      std::sort(matches.begin(), matches.end(),
+                [&](auto &match1, auto &match2) -> bool {
+                  return match1.Distance < match2.Distance;
+                });
+    }
+  }
+};
+
 static size_t EstimateFunctionSize(Function *F, TargetTransformInfo *TTI);
 
 template <class T> class MatcherReport {
@@ -4165,6 +4511,9 @@ bool FunctionMerging::runImpl(
 
   if (!ToMergeFile.empty()) {
     matcher = std::make_unique<MatcherManual<Function *>>(FM, Options, ToMergeFile);
+  } else if (PredictAlignment) {
+    matcher = std::make_unique<MatcherAlignmentScoreFPTy<Function *>>(FM, Options, LSHRows, LSHBands);
+    errs() << "Predicting Alignment Score Matcher\n";
   } else if (EnableF3M) {
     matcher = std::make_unique<MatcherLSH<Function *>>(FM, Options, LSHRows, LSHBands);
     errs() << "LSH MH\n";
