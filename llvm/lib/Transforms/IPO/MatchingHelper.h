@@ -9,6 +9,7 @@
 class MatchingHelper {
 private:
     const std::string model_path = "/home/chuongg3/Projects/ThirdYearProject/Model/log/MultiHeadAttention/";
+    // const std::string model_path = "/home/chuongg3/Projects/ThirdYearProject/Model/log/L1SiameseWeighted0Model/";
 
     TF_Graph* graph = TF_NewGraph();
     TF_SessionOptions* session_options = TF_NewSessionOptions();

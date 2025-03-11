@@ -139,7 +139,7 @@
 
 //#define ENABLE_DEBUG_CODE
 
-#define SKIP_MERGING
+//#define SKIP_MERGING
 
 #define TIME_STEPS_DEBUG
 
@@ -2558,6 +2558,7 @@ private:
     std::vector<float> entry_encoding;
     std::vector<float> current_encoding;
     std::vector<bool> valid_candidates;
+    valid_candidates.push_back(false);
 
     // Get the current function's encoding and preprocess it
     auto candidate_encoding = FunctionEncodingMap.at(processFunctionName(GetValueName(it->candidate)));
@@ -2568,7 +2569,7 @@ private:
       //// Go through every single candidate and find the best match
       for (auto entry = std::next(candidates.cbegin()); entry != candidates.cend(); ++entry) {
         auto entry_name = GetValueName(entry->candidate);
-        dbgs() << "Currently Assessing: " << candidate_name << "\n";
+        dbgs() << "Currently Assessing: " << entry_name << "\n";
         // If not valid, skip
         if (it->candidate == entry->candidate) {
           dbgs() << "Skipping: Same Pair: " << candidate_name << " | " << entry_name << "\n";
@@ -2595,11 +2596,11 @@ private:
 
       }
       // Using the model to predict alignment score
-      dbgs() << "Predicting Alignent Score";
+      dbgs() << "Predicting Alignent Score\n";
       std::vector<float> candidate_float(candidate_encoding.begin(), candidate_encoding.end());
       std::vector<float> entry_float(entry_encoding.begin(), entry_encoding.end());
       // std::vector<float> results = Helper.predict_value(current_encoding, entry_float);
-      std::vector<float> results = Helper.predict_in_batches(current_encoding, entry_float);
+      std::vector<float> results = Helper.predict_value(current_encoding, entry_float);
 
       // End if there are no predictions
       if (results.size() == 0) {
@@ -2612,21 +2613,27 @@ private:
       int index = std::distance(results.begin(), max_it);
       dbgs() << "Highest Alignment Score: " << *max_it << "\n";
 
-      // Get the candidate with the highest alignment score
+      // If the highest score is less than 0.5, skip
+      if (*max_it < 0.5) {
+        dbgs() << "SKIPPING: No good candidates\n";
+        return;
+      }
+
       int count = 0;
       for (unsigned int i = 0; i < candidates.size(); i++) {
-        if (count == index) {
-          auto best_candidate = candidates.cbegin();
-          std::advance(best_candidate, i);
-          dbgs() << "Best Candidate: " << GetValueName(best_candidate->candidate) << "\n";
-          best_match.candidate = best_candidate->candidate;
-          best_match.Size = best_candidate->size;
-          best_match.Magnitude = best_candidate->FP.magnitude;
-          best_match.Distance = results.at(index);
-          break;
-        }
-        else if (valid_candidates.at(i))
+        if (valid_candidates.at(i)) {
+          if (count == index) {
+            auto best_candidate = candidates.cbegin();
+            std::advance(best_candidate, i);
+            dbgs() << "Best Candidate: " << GetValueName(best_candidate->candidate) << "\n";
+            best_match.candidate = best_candidate->candidate;
+            best_match.Size = best_candidate->size;
+            best_match.Magnitude = best_candidate->FP.magnitude;
+            best_match.Distance = results.at(index);
+            break;
+          }
           count++;
+        }
       }
 
       // Place best candidate in matches one is found
