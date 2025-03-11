@@ -1,10 +1,8 @@
 find_package(SQLite3 REQUIRED)
-find_package(pybind11 REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 
 # Tensorflow Paths
-set(TensorFlow_INCLUDE_DIRS "/usr/local/include/tensorflow")
-set(TensorFlow_LIBRARIES "/usr/local/lib/libtensorflow.so" "/usr/local/lib/libtensorflow_framework.so")
+set(TensorFlow_INCLUDE_DIRS "${ThirdYearProject_BASE_DIR}/local/include")
+set(TensorFlow_LIBRARIES "${ThirdYearProject_BASE_DIR}/local/lib/libtensorflow.so" "${ThirdYearProject_BASE_DIR}/local/lib/libtensorflow_framework.so")
 
 include_directories(${TensorFlow_INCLUDE_DIRS})
 
