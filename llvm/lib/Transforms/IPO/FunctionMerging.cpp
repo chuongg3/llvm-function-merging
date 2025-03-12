@@ -2559,9 +2559,10 @@ private:
     best_match.OtherSize = it->size;
     best_match.OtherMagnitude = it->FP.magnitude;
     best_match.Distance = std::numeric_limits<float>::min();
-
-    errs() << "Current Function Name: " << it->candidate->getName() << "\n";
-    errs() << "First Function Name (Skipped): " << candidates.front().candidate->getName() << "\n";
+    if (Verbose) {
+      errs() << "Current Function Name: " << it->candidate->getName() << "\n";
+      errs() << "First Function Name (Skipped): " << candidates.front().candidate->getName() << "\n";
+    }
 
     // Initialise variables for this
     std::vector<float> entry_encoding;
@@ -2578,21 +2579,25 @@ private:
       //// Go through every single candidate and find the best match
       for (auto entry = std::next(candidates.cbegin()); entry != candidates.cend(); ++entry) {
         auto entry_name = GetValueName(entry->candidate);
-        dbgs() << "Currently Assessing: " << entry_name << "\n";
+        if (Verbose)
+          dbgs() << "Currently Assessing: " << entry_name << "\n";
         // If not valid, skip
         if (it->candidate == entry->candidate) {
-          dbgs() << "Skipping: Same Pair: " << candidate_name << " | " << entry_name << "\n";
+          if (Verbose)
+            dbgs() << "Skipping: Same Pair: " << candidate_name << " | " << entry_name << "\n";
           valid_candidates.push_back(false);
           continue;
         }
         else if ((!FM.validMergeTypes(it->candidate, entry->candidate, Options) &&
               !Options.EnableUnifiedReturnType) ||
             !validMergePair(it->candidate, entry->candidate)){
-          dbgs() << "Skipping Invalid Pair: " << candidate_name << " | " << entry_name << "\n";
+          if (Verbose)
+            dbgs() << "Skipping Invalid Pair: " << candidate_name << " | " << entry_name << "\n";
           valid_candidates.push_back(false);
           continue;
         }
-        dbgs() << "Accepting Pair: " << candidate_name << " | " << entry_name << "\n";
+        if (Verbose)
+          dbgs() << "Accepting Pair: " << candidate_name << " | " << entry_name << "\n";
 
         // Get the current entry's encoding
         auto entry_vec = FunctionEncodingMap.at(processFunctionName(GetValueName(entry->candidate)));
@@ -2605,7 +2610,8 @@ private:
 
       }
       // Using the model to predict alignment score
-      dbgs() << "Predicting Alignent Score\n";
+      if (Verbose)
+        dbgs() << "Predicting Alignent Score\n";
       std::vector<float> candidate_float(candidate_encoding.begin(), candidate_encoding.end());
       std::vector<float> entry_float(entry_encoding.begin(), entry_encoding.end());
       // std::vector<float> results = Helper.predict_value(current_encoding, entry_float);
@@ -2613,7 +2619,8 @@ private:
 
       // End if there are no predictions
       if (results.size() == 0) {
-        dbgs() << "No Predictions\n";
+        if (Verbose)
+          dbgs() << "No Predictions\n";
         return;
       }
 
