@@ -273,6 +273,15 @@ static cl::opt<bool> PredictAlignment(
   "predict-alignment", cl::init(false), cl::Hidden,
   cl::desc("Enable the prediction of the alignment between functions"));
 
+static cl::opt<std::string> TYPDirectory(
+  "typ-dir", cl::init(""), cl::Hidden,
+  cl::desc("Directory of Third Year Project"));
+
+// Pass the current benchmark name through the command line
+static cl::opt<std::string> ModelName(
+  "model-name", cl::init("MultiHeadAttention"), cl::value_desc("ModelName"),
+  cl::desc("Model's name to use for predictions"), cl::Hidden);
+
 static std::string GetValueName(const Value *V);
 
 #ifdef __unix__ /* __unix__ is usually defined by compilers targeting Unix     \
@@ -2369,9 +2378,9 @@ private:
   SearchStrategy strategy;
 
   // AlignmentScore Prediction Related Variables
-  std::string EncodingBaseDir = "/home/chuongg3/Projects/ThirdYearProject/scripts/GetEncoding/Embedding";
+  std::string EncodingBaseDir = TYPDirectory + "/scripts/GetEncoding/Embedding/";
   std::unordered_map<std::string, std::vector<double>> FunctionEncodingMap;
-  MatchingHelper Helper = MatchingHelper();
+  MatchingHelper Helper = MatchingHelper(TYPDirectory, ModelName);
 
   // Reads the file output from IR2Vec and then returns a unordered map of function name to vector embeddings
   std::unordered_map<std::string, std::vector<double>> getFunctionMapVector(const std::string& benchmarkname) {
@@ -2381,7 +2390,7 @@ private:
     std::unordered_map<std::string, std::vector<double>> encoding_map;
 
     // Try accessing the file
-    std::string encodingFile = EncodingBaseDir + "/" + benchmarkname + ".emb";
+    std::string encodingFile = EncodingBaseDir + benchmarkname + ".emb";
     std::ifstream file(encodingFile);
     if (!file.is_open()) {
       dbgs() << "Error opening file: " << encodingFile << "\n";

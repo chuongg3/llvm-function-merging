@@ -8,9 +8,7 @@
 
 class MatchingHelper {
 private:
-    const std::string model_path = "/home/chuongg3/Projects/ThirdYearProject/Model/log/MultiHeadAttention/";
-    // const std::string model_path = "/home/chuongg3/Projects/ThirdYearProject/Model/log/L1SiameseWeighted0Model/";
-
+    std::string model_path;
     TF_Graph* graph = TF_NewGraph();
     TF_SessionOptions* session_options = TF_NewSessionOptions();
     TF_Status* status = TF_NewStatus();
@@ -29,7 +27,8 @@ public:
     }
 
     // Constructor
-    MatchingHelper() {
+    MatchingHelper(std::string TYP_Directory, std::string model_name = "MultiHeadAttention") {
+        model_path = TYP_Directory + "/Model/log/" + model_name + "/";
         if (!load_model()) {
             llvm::dbgs() << "Error loading model" << "\n";
         }
