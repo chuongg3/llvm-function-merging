@@ -1,21 +1,21 @@
 #ifndef MATCHINGHELPER_H
 #define MATCHINGHELPER_H
 
-#include <iostream>
-#include <tensorflow/c/c_api.h>  // TensorFlow C API
-#include <iostream>
 #include <vector>
+#include <iostream>
+#include <tensorflow/c/c_api.h>
 
 class MatchingHelper {
 private:
     std::string model_path;
+    std::string modelName;
     TF_Graph* graph = TF_NewGraph();
     TF_SessionOptions* session_options = TF_NewSessionOptions();
     TF_Status* status = TF_NewStatus();
     TF_Session* session;
 public:
-    bool load_model() {
-        const char* tags[] = {"serve"};  // Use "serve" since it's listed in your model
+    bool load_model(std::string model_name) {
+        const char* tags[] = {"serve"};
         int num_tags = 1;
 
         session = TF_LoadSessionFromSavedModel(session_options, nullptr, model_path.c_str(), tags, num_tags, graph, nullptr, status);
@@ -28,8 +28,9 @@ public:
 
     // Constructor
     MatchingHelper(std::string TYP_Directory, std::string model_name = "MultiHeadAttention") {
+        modelName = model_name;
         model_path = TYP_Directory + "/Model/log/" + model_name + "/";
-        if (!load_model()) {
+        if (!load_model(model_name)) {
             llvm::dbgs() << "Error loading model" << "\n";
         }
     }
@@ -58,14 +59,21 @@ public:
         std::memcpy(TF_TensorData(input_tensor2), input2.data(), sizeof(float) * input2.size());
 
         // Set up input tensors and operations
-        TF_Output input_op1 = {TF_GraphOperationByName(graph, "serving_default_input_vec1"), 0};
-        TF_Output input_op2 = {TF_GraphOperationByName(graph, "serving_default_input_vec2"), 0};
+        TF_Output input_op1, input_op2;
+        if (modelName == "MultiHeadAttention") {
+            input_op1 = {TF_GraphOperationByName(graph, "serving_default_input_vec1"), 0};
+            input_op2 = {TF_GraphOperationByName(graph, "serving_default_input_vec2"), 0};
+        }
+        else if (modelName == "DotProdSiameseModel") {
+            input_op1 = {TF_GraphOperationByName(graph, "serving_default_input_layer_1"), 0};
+            input_op2 = {TF_GraphOperationByName(graph, "serving_default_input_layer_2"), 0};
+        }
 
         if (input_op1.oper == nullptr || input_op2.oper == nullptr) {
             llvm::dbgs() << "Error: Input operations not found in the model" << "\n";
             TF_DeleteTensor(input_tensor1);
             TF_DeleteTensor(input_tensor2);
-            // TF_DeleteStatus(status);
+            TF_DeleteStatus(status);
             return {};
         }
 
@@ -75,7 +83,7 @@ public:
             llvm::dbgs() << "Error: Output operation not found in the model" << "\n";
             TF_DeleteTensor(input_tensor1);
             TF_DeleteTensor(input_tensor2);
-            // TF_DeleteStatus(status);
+            TF_DeleteStatus(status);
             return {};
         }
 
@@ -88,12 +96,12 @@ public:
         // Run the session
         TF_SessionRun(
             session,
-            nullptr, // Run options
-            inputs, input_values, 2, // Input tensors, input tensor values, number of inputs
-            outputs, output_values, 1, // Output tensors, output tensor values, number of outputs
-            nullptr, 0, // Target operations, number of targets
-            nullptr, // Run metadata
-            status // Output status
+            nullptr,
+            inputs, input_values, 2,
+            outputs, output_values, 1,
+            nullptr, 0,
+            nullptr,
+            status
         );
 
         // Check session run status
@@ -101,7 +109,7 @@ public:
             llvm::dbgs() << "Error running session: " << TF_Message(status) << "\n";
             TF_DeleteTensor(input_tensor1);
             TF_DeleteTensor(input_tensor2);
-            // TF_DeleteStatus(status);
+            TF_DeleteStatus(status);
             return {};
         }
 
@@ -126,25 +134,25 @@ public:
             return {};
         }
 
-        const int item_size = 300; // Vector size
+        // Encoding Size
+        const int item_size = 300;
         const int total_items = input1.size() / item_size;
         std::vector<float> all_results;
 
         // Process in batches
         for (int batch_start = 0; batch_start < total_items; batch_start += batch_size) {
-            // Calculate actual batch size (might be smaller for the last batch)
+            // Calculate actual batch size
             int current_batch_size = std::min(batch_size, total_items - batch_start);
 
             // Extract batch data
             std::vector<float> batch1(current_batch_size * item_size);
             std::vector<float> batch2(current_batch_size * item_size);
 
-            // Replace the item-by-item loop with single batch copies
             // Calculate start position and size for the batch
             int src_start = batch_start * item_size;
             int elements_to_copy = current_batch_size * item_size;
 
-            // Copy entire batch at once from each input
+            // Copy batched data from each input
             std::copy(input1.begin() + src_start, input1.begin() + src_start + elements_to_copy,
                 batch1.begin());
             std::copy(input2.begin() + src_start, input2.begin() + src_start + elements_to_copy,
